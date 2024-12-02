@@ -229,7 +229,10 @@ class FroniusSolarNet:
             raise ConfigEntryNotReady(
                 translation_domain=DOMAIN,
                 translation_key="entry_cannot_connect",
-                translation_placeholders={"host": self.host},
+                translation_placeholders={
+                    "host": self.host,
+                    "fronius_error": str(err),
+                },
             ) from err
 
         for inverter in _inverter_info["inverters"]:
