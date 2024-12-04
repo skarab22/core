@@ -22,6 +22,7 @@ from .manager import (
     BackupPlatformProtocol,
     BackupProgress,
     BackupReaderWriter,
+    BackupReaderWriterError,
     CoreBackupReaderWriter,
     NewBackup,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "BackupPlatformProtocol",
     "BackupProgress",
     "BackupReaderWriter",
+    "BackupReaderWriterError",
     "Folder",
     "LocalBackupAgent",
     "NewBackup",

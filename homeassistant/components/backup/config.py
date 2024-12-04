@@ -18,7 +18,7 @@ from homeassistant.helpers.typing import UNDEFINED, UndefinedType
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, LOGGER
-from .models import Folder
+from .models import BackupManagerError, Folder
 
 if TYPE_CHECKING:
     from .manager import Backup, BackupManager
@@ -291,16 +291,22 @@ class BackupSchedule:
             self._schedule_next(cron_pattern, manager)
 
             # Create the backup
-            await manager.async_create_backup(
-                agent_ids=config_data.create_backup.agent_ids,
-                include_addons=config_data.create_backup.include_addons,
-                include_all_addons=config_data.create_backup.include_all_addons,
-                include_database=config_data.create_backup.include_database,
-                include_folders=config_data.create_backup.include_folders,
-                include_homeassistant=True,  # always include HA
-                name=config_data.create_backup.name,
-                password=config_data.create_backup.password,
-            )
+            try:
+                await manager.async_create_backup(
+                    agent_ids=config_data.create_backup.agent_ids,
+                    include_addons=config_data.create_backup.include_addons,
+                    include_all_addons=config_data.create_backup.include_all_addons,
+                    include_database=config_data.create_backup.include_database,
+                    include_folders=config_data.create_backup.include_folders,
+                    include_homeassistant=True,  # always include HA
+                    name=config_data.create_backup.name,
+                    password=config_data.create_backup.password,
+                )
+            except Exception as err:  # noqa: BLE001
+                if isinstance(err, BackupManagerError):
+                    LOGGER.error("Error creating backup: %s", err)
+                else:
+                    LOGGER.exception("Error creating backup")
 
             # Delete old backups more numerous than copies
 

@@ -42,7 +42,7 @@ from .const import (
     EXCLUDE_FROM_BACKUP,
     LOGGER,
 )
-from .models import AgentBackup, Folder
+from .models import AgentBackup, BackupManagerError, Folder
 from .util import make_backup_dir, read_backup, receive_file
 
 
@@ -121,6 +121,10 @@ class BackupReaderWriter(abc.ABC):
         restore_homeassistant: bool,
     ) -> None:
         """Restore a backup."""
+
+
+class BackupReaderWriterError(HomeAssistantError):
+    """Backup reader/writer error."""
 
 
 class BackupManager:
@@ -215,7 +219,7 @@ class BackupManager:
         )
         for result in pre_backup_results:
             if isinstance(result, Exception):
-                raise result
+                raise BackupManagerError(str(result)) from result
 
     async def async_post_backup_actions(self) -> None:
         """Perform post backup actions."""
@@ -228,7 +232,7 @@ class BackupManager:
         )
         for result in post_backup_results:
             if isinstance(result, Exception):
-                raise result
+                raise BackupManagerError(str(result)) from result
 
     async def load_platforms(self) -> None:
         """Load backup platforms."""
@@ -252,12 +256,19 @@ class BackupManager:
         LOGGER.debug("Uploading backup %s to agents %s", backup.backup_id, agent_ids)
 
         async def send_backup() -> AsyncGenerator[bytes]:
-            f = await self.hass.async_add_executor_job(path.open, "rb")
             try:
-                while chunk := await self.hass.async_add_executor_job(f.read, 2**20):
-                    yield chunk
-            finally:
-                await self.hass.async_add_executor_job(f.close)
+                f = await self.hass.async_add_executor_job(path.open, "rb")
+                try:
+                    while chunk := await self.hass.async_add_executor_job(
+                        f.read, 2**20
+                    ):
+                        yield chunk
+                finally:
+                    await self.hass.async_add_executor_job(f.close)
+            except OSError as err:
+                raise BackupManagerError(
+                    f"Error accessing backup file {path} for reading"
+                ) from err
 
         async def open_backup() -> AsyncGenerator[bytes]:
             return send_backup()
@@ -276,9 +287,14 @@ class BackupManager:
             )
             for result in sync_backup_results:
                 if isinstance(result, Exception):
-                    LOGGER.exception(
-                        "Error during backup upload - %s", result, exc_info=result
-                    )
+                    if isinstance(result, BackupAgentError):
+                        LOGGER.error("Error during backup upload - %s", result)
+                    else:
+                        LOGGER.exception(
+                            "Unexpected error during backup upload - %s",
+                            result,
+                            exc_info=result,
+                        )
         finally:
             self.syncing = False
 
@@ -300,6 +316,7 @@ class BackupManager:
                 agent_errors[agent_ids[idx]] = result
                 continue
             if isinstance(result, BaseException):
+                # this is an unexpected error
                 raise result
             for agent_backup in result:
                 if agent_backup.backup_id not in backups:
@@ -340,6 +357,7 @@ class BackupManager:
                 agent_errors[agent_ids[idx]] = result
                 continue
             if isinstance(result, BaseException):
+                # this is an unexpected error
                 raise result
             if not result:
                 continue
@@ -378,6 +396,7 @@ class BackupManager:
                 agent_errors[agent_ids[idx]] = result
                 continue
             if isinstance(result, BaseException):
+                # this is an unexpected error
                 raise result
 
         return agent_errors
@@ -444,28 +463,34 @@ class BackupManager:
     ) -> NewBackup:
         """Initiate generating a backup."""
         if self.backup_task:
-            raise HomeAssistantError("Backup already in progress")
+            raise BackupManagerError("Backup already in progress")
         if not agent_ids:
-            raise HomeAssistantError("At least one agent must be selected")
+            raise BackupManagerError("At least one agent must be selected")
         if any(agent_id not in self.backup_agents for agent_id in agent_ids):
-            raise HomeAssistantError("Invalid agent selected")
+            raise BackupManagerError("Invalid agent selected")
         if include_all_addons and include_addons:
-            raise HomeAssistantError(
+            raise BackupManagerError(
                 "Cannot include all addons and specify specific addons"
             )
 
         backup_name = name or f"Core {HAVERSION}"
-        new_backup, self.backup_task = await self._reader_writer.async_create_backup(
-            agent_ids=agent_ids,
-            backup_name=backup_name,
-            include_addons=include_addons,
-            include_all_addons=include_all_addons,
-            include_database=include_database,
-            include_folders=include_folders,
-            include_homeassistant=include_homeassistant,
-            on_progress=self.async_on_backup_event,
-            password=password,
-        )
+        try:
+            (
+                new_backup,
+                self.backup_task,
+            ) = await self._reader_writer.async_create_backup(
+                agent_ids=agent_ids,
+                backup_name=backup_name,
+                include_addons=include_addons,
+                include_all_addons=include_all_addons,
+                include_database=include_database,
+                include_folders=include_folders,
+                include_homeassistant=include_homeassistant,
+                on_progress=self.async_on_backup_event,
+                password=password,
+            )
+        except BackupReaderWriterError as err:
+            raise BackupManagerError(str(err)) from err
         self.finish_backup_task = self.hass.async_create_task(
             self._async_finish_backup(agent_ids),
             name="backup_manager_finish_backup",
@@ -473,12 +498,20 @@ class BackupManager:
         return new_backup
 
     async def _async_finish_backup(self, agent_ids: list[str]) -> None:
+        """Finish a backup.
+
+        This method should not raise any exceptions
+        since nothing will await this task.
+        """
         if TYPE_CHECKING:
             assert self.backup_task is not None
         try:
             backup, tar_file_path = await self.backup_task
         except Exception as err:  # noqa: BLE001
-            LOGGER.debug("Generating backup failed", exc_info=err)
+            if isinstance(err, BackupReaderWriterError):
+                LOGGER.debug("Generating backup failed", exc_info=err)
+            else:
+                LOGGER.exception("Unexpected error when generating backup")
         else:
             LOGGER.debug(
                 "Generated new backup with backup_id %s, uploading to agents %s",
@@ -495,14 +528,29 @@ class BackupManager:
                 if local_path == tar_file_path:
                     keep_path = True
                     continue
-                await self.hass.async_add_executor_job(
-                    shutil.copy, tar_file_path, local_path
-                )
+                try:
+                    await self.hass.async_add_executor_job(
+                        shutil.copy, tar_file_path, local_path
+                    )
+                except OSError as err:
+                    LOGGER.debug(
+                        "Error copying temporary backup file %s to %s",
+                        tar_file_path,
+                        local_path,
+                        exc_info=err,
+                    )
             await self._async_upload_backup(
                 backup=backup, agent_ids=agent_ids, path=tar_file_path
             )
             if not keep_path:
-                await self.hass.async_add_executor_job(tar_file_path.unlink, True)
+                try:
+                    await self.hass.async_add_executor_job(tar_file_path.unlink, True)
+                except OSError as err:
+                    LOGGER.debug(
+                        "Error deleting temporary backup file %s",
+                        tar_file_path,
+                        exc_info=err,
+                    )
         finally:
             self.backup_task = None
             self.finish_backup_task = None
@@ -524,14 +572,14 @@ class BackupManager:
         if agent_id in self.local_backup_agents:
             local_agent = self.local_backup_agents[agent_id]
             if not await local_agent.async_get_backup(backup_id):
-                raise HomeAssistantError(
+                raise BackupManagerError(
                     f"Backup {backup_id} not found in agent {agent_id}"
                 )
         else:
             path = self.temp_backup_dir / f"{backup_id}.tar"
             agent = self.backup_agents[agent_id]
             if not await agent.async_get_backup(backup_id):
-                raise HomeAssistantError(
+                raise BackupManagerError(
                     f"Backup {backup_id} not found in agent {agent_id}"
                 )
             stream = await agent.async_download_backup(backup_id)
@@ -605,11 +653,11 @@ class CoreBackupReaderWriter(BackupReaderWriter):
         backup_id = _generate_backup_id(date_str, backup_name)
 
         if include_addons or include_all_addons or include_folders:
-            raise HomeAssistantError(
+            raise BackupReaderWriterError(
                 "Addons and folders are not supported by core backup"
             )
         if not include_homeassistant:
-            raise HomeAssistantError("Home Assistant must be included in backup")
+            raise BackupReaderWriterError("Home Assistant must be included in backup")
 
         backup_task = self._hass.async_create_task(
             self._async_create_backup(
@@ -673,6 +721,9 @@ class CoreBackupReaderWriter(BackupReaderWriter):
                 password,
                 suggested_tar_file_path,
             )
+        except (BackupManagerError, OSError) as err:
+            raise BackupReaderWriterError("Error creating backup") from err
+        else:
             backup = AgentBackup(
                 addons=[],
                 backup_id=backup_id,
@@ -690,7 +741,10 @@ class CoreBackupReaderWriter(BackupReaderWriter):
         finally:
             on_progress(BackupProgress(done=True, stage=None, success=success))
             # Inform integrations the backup is done
-            await manager.async_post_backup_actions()
+            try:
+                await manager.async_post_backup_actions()
+            except BackupManagerError as err:
+                raise BackupReaderWriterError("Error post backup actions") from err
 
     def _mkdir_and_generate_backup_contents(
         self,
@@ -749,11 +803,11 @@ class CoreBackupReaderWriter(BackupReaderWriter):
         """
 
         if restore_addons or restore_folders:
-            raise HomeAssistantError(
+            raise BackupReaderWriterError(
                 "Addons and folders are not supported in core restore"
             )
         if not restore_homeassistant and not restore_database:
-            raise HomeAssistantError(
+            raise BackupReaderWriterError(
                 "Home Assistant or database must be included in restore"
             )
 

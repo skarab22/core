@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
+from aiohasupervisor.exceptions import SupervisorError
 from aiohasupervisor.models import backups as supervisor_backups
 
 from homeassistant.components.backup import (
@@ -15,6 +16,7 @@ from homeassistant.components.backup import (
     BackupAgent,
     BackupProgress,
     BackupReaderWriter,
+    BackupReaderWriterError,
     Folder,
     LocalBackupAgent,
     NewBackup,
@@ -146,19 +148,22 @@ class SupervisorBackupReaderWriter(BackupReaderWriter):
             else None
         )
 
-        backup = await self._client.backups.partial_backup(
-            supervisor_backups.PartialBackupOptions(
-                addons=include_addons_set,
-                folders=include_folders_set,
-                homeassistant=include_homeassistant,
-                name=backup_name,
-                password=password,
-                compressed=True,
-                location=None,
-                homeassistant_exclude_database=not include_database,
-                background=True,
+        try:
+            backup = await self._client.backups.partial_backup(
+                supervisor_backups.PartialBackupOptions(
+                    addons=include_addons_set,
+                    folders=include_folders_set,
+                    homeassistant=include_homeassistant,
+                    name=backup_name,
+                    password=password,
+                    compressed=True,
+                    location=None,
+                    homeassistant_exclude_database=not include_database,
+                    background=True,
+                )
             )
-        )
+        except SupervisorError as err:
+            raise BackupReaderWriterError(f"Error creating backup: {err}") from err
         backup_task = self._hass.async_create_task(
             self._async_wait_for_backup(backup),
             name="backup_manager_create_backup",
