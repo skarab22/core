@@ -37,7 +37,7 @@ on:
         type: boolean
 
 env:
-  CACHE_VERSION: 14
+  CACHE_VERSION: 11
   UV_CACHE_VERSION: 1
   MYPY_CACHE_VERSION: 9
   HA_SHORT_VERSION: "2025.1"
@@ -76,7 +76,7 @@ jobs:
       - name: Cleanup
         run: |
           echo "Fetching list of cache key"
-          cacheKeysForPR=$(gh cache list --ref $BRANCH --limit 10 --json id --jq '.[].id')
+          cacheKeysForPR=$(gh cache list --ref $BRANCH --json id --jq '.[].id')
 
           ## Setting this to not fail the workflow while deleting cache keys.
           set +e
@@ -91,6 +91,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           BRANCH: refs/heads/edenhaus-test
   info:
+    needs:
+      - cleanup
     name: Collect information & changes data
     outputs:
       # In case of issues with the partial run, use the following line instead:
