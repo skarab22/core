@@ -881,7 +881,6 @@ INTEGRATIONS_WITHOUT_QUALITY_SCALE_FILE = [
     "rmvtransport",
     "roborock",
     "rocketchat",
-    "roku",
     "romy",
     "roomba",
     "roon",
