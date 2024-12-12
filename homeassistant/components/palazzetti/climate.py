@@ -16,7 +16,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import PalazzettiConfigEntry
-from .const import DOMAIN, FAN_AUTO, FAN_HIGH, FAN_MODES, FAN_SILENT
+from .const import DOMAIN, FAN_AUTO, FAN_HIGH, FAN_MODES, FAN_SILENT, POWER_LEVEL
 from .coordinator import PalazzettiDataUpdateCoordinator
 from .entity import PalazzettiEntity
 
@@ -43,6 +43,7 @@ class PalazzettiClimateEntity(PalazzettiEntity, ClimateEntity):
         | ClimateEntityFeature.FAN_MODE
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
+        | ClimateEntityFeature.PRESET_MODE
     )
 
     def __init__(self, coordinator: PalazzettiDataUpdateCoordinator) -> None:
@@ -57,8 +58,8 @@ class PalazzettiClimateEntity(PalazzettiEntity, ClimateEntity):
         self._attr_fan_modes = list(
             map(str, range(client.fan_speed_min, client.fan_speed_max + 1))
         )
-        if client.has_fan_silent:
-            self._attr_fan_modes.insert(0, FAN_SILENT)
+        #if client.has_fan_silent:
+        #    self._attr_fan_modes.insert(0, FAN_SILENT)
         if client.has_fan_high:
             self._attr_fan_modes.append(FAN_HIGH)
         if client.has_fan_auto:
@@ -151,3 +152,8 @@ class PalazzettiClimateEntity(PalazzettiEntity, ClimateEntity):
                 },
             ) from err
         await self.coordinator.async_refresh()
+
+    async def async_set_power_level(self, power_level: int):
+        await self._client.set_power_level(power_level)
+        self._attr_power_level = power_level
+        self.async_write_ha_state()
